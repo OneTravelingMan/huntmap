@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Satellite Weather Map</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden; background-color: #000;
+        }
+
+        /* Map and Canvas Layers */
+        #map {
+            width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1;
+        }
+
+        #wind-canvas {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 5; pointer-events: none;
+        }
+
+        /* Strict UI Layer Separation */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 50; pointer-events: none; display: flex; flex-direction: column;
+        }
+
+        /* Re-enable interactions only on specific UI elements */
+        .interactive-ui { pointer-events: auto; }
+
+        .glass {
+            background: rgba(17, 24, 39, 0.75);
+            backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+        }
+
+        .leaflet-control-zoom, .leaflet-control-attribution { display: none !important; }
+        
+        /* Leaflet Popup Overrides for Swatches */
+        .leaflet-popup-content-wrapper {
+            background: rgba(17, 24, 39, 0.9); color: white;
+            border-radius: 0.5rem; border: 1px solid rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(8px); padding: 2px;
+        }
+        .leaflet-popup-tip { background: rgba(17, 24, 39, 0.9); }
+        .leaflet-popup-close-button { display: none; }
+        .leaflet-popup-content { margin: 8px !important; }
+
+        .ruler-tooltip {
+            background: rgba(0, 0, 0, 0.8); border: 1px solid #ffffff;
+            color: #ffffff; font-weight: bold; border-radius: 4px;
+            padding: 2px 6px; box-shadow: none; white-space: nowrap;
+        }
+        .leaflet-tooltip-top:before { border-top-color: rgba(0,0,0,0.8); }
+
+        .custom-pin-marker {
+            width: 24px; height: 24px; border-radius: 50%;
+            border: 3px solid white; box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+        }
+        
+        .weather-pin-marker {
+            width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            border-radius: 50%; border: 3px solid white; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            display: flex; align-items: center; justify-content: center; color: white; font-size: 14px;
+        }
+
+        .slide-transition { transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease; }
+        .weather-pane-open { transform: translateX(0) !important; }
+        .timeline-open { transform: translateY(0) !important; }
+        
+        /* Presentation Mode Hiding */
+        .presentation-hidden { opacity: 0 !important; pointer-events: none !important; transform: scale(0.95); transition: all 0.4s ease; }
+
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.05); }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 10px; }
+
+        input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%;
+            background: #3b82f6; cursor: pointer; margin-top: -10px; border: 2px solid white;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%; height: 4px; cursor: pointer; background: rgba(255,255,255,0.3); border-radius: 2px;
+        }
+
+        .cursor-crosshair { cursor: crosshair !important; }
+        .cursor-pointer-map { cursor: pointer !important; }
+    </style>
+</head>
+<body class="text-white antialiased">
+
+    <!-- Layer 1 & 2: Map and Wind Canvas -->
+    <div id="map"></div>
+    <canvas id="wind-canvas"></canvas>
+
+    <!-- Layer 3: UI Layer -->
+    <div id="ui-layer">
+        
+        <!-- Top Controls -->
+        <div class="ui-element absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 transition-all duration-300">
+            <div class="interactive-ui glass rounded-full flex items-center px-4 py-2 w-[90vw] md:w-96 max-w-full">
+                <i class="fa-solid fa-magnifying-glass text-gray-400"></i>
+                <input type="text" id="search-input" placeholder="Search location..." 
+                       class="bg-transparent border-none outline-none text-white ml-3 w-full placeholder-gray-400 text-sm">
+                <button id="search-btn" class="ml-2 hover:text-blue-400 transition-colors px-2">
+                    <i class="fa-solid fa-arrow-right"></i>
+                </button>
+            </div>
+            <button id="presentation-btn" class="interactive-ui glass w-10 h-10 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors shrink-0" title="Presentation Mode">
+                <i class="fa-solid fa-tv text-gray-300"></i>
+            </button>
+        </div>
+
+        <!-- Compass -->
+        <div class="ui-element absolute top-4 right-4 md:right-6 transition-all duration-300">
+            <div class="glass w-10 h-10 md:w-12 md:h-12 rounded-full flex flex-col items-center justify-center shadow-lg cursor-default">
+                <span class="text-red-500 text-[10px] md:text-xs font-bold leading-none mb-1">N</span>
+                <i class="fa-solid fa-caret-up text-gray-400 text-sm leading-none"></i>
+            </div>
+        </div>
+
+        <!-- Left Toolbar (Strict Uniform Flexbox) -->
+        <div class="ui-element interactive-ui absolute left-2 md:left-4 top-1/2 -translate-y-1/2 flex flex-col gap-3 transition-all duration-300">
+            
+            <button class="tool-btn glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center transition-colors bg-blue-600/90 border-blue-400 border" data-tool="none" title="Pan Map">
+                <i class="fa-solid fa-hand-paper text-gray-200 text-lg"></i>
+            </button>
+
+            <button class="tool-btn glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors" data-tool="weather" title="Weather Pin">
+                <i class="fa-solid fa-cloud-sun text-blue-400 text-lg"></i>
+            </button>
+
+            <button class="tool-btn glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors" data-tool="pin" title="Standard Pin">
+                <i class="fa-solid fa-map-marker-alt text-red-500 text-lg"></i>
+            </button>
+
+            <!-- Draw Tool Wrapper -->
+            <div class="relative group flex justify-center">
+                <button class="tool-btn glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors" data-tool="draw" title="Draw Tool">
+                    <i class="fa-solid fa-pen text-green-400 text-lg"></i>
+                </button>
+                <div id="draw-colors" class="absolute left-14 top-1/2 -translate-y-1/2 glass rounded-full px-2 py-1 flex items-center gap-2 opacity-0 pointer-events-none transition-opacity duration-200">
+                    <button class="draw-color-btn w-6 h-6 rounded-full bg-red-500 border-2 border-white" data-color="#ef4444"></button>
+                    <button class="draw-color-btn w-6 h-6 rounded-full bg-blue-500 border-2 border-transparent hover:border-white" data-color="#3b82f6"></button>
+                    <button class="draw-color-btn w-6 h-6 rounded-full bg-green-500 border-2 border-transparent hover:border-white" data-color="#22c55e"></button>
+                    <button class="draw-color-btn w-6 h-6 rounded-full bg-yellow-400 border-2 border-transparent hover:border-white" data-color="#facc15"></button>
+                </div>
+            </div>
+
+            <button class="tool-btn glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors" data-tool="ruler" title="Measure Distance (Yards)">
+                <i class="fa-solid fa-ruler text-white text-lg"></i>
+            </button>
+
+            <button id="wind-toggle-btn" class="glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors" title="Toggle Wind Grid">
+                <i class="fa-solid fa-wind text-gray-300 text-lg"></i>
+            </button>
+
+            <button id="scent-toggle-btn" class="glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors" title="Toggle Scent Cones">
+                <i class="fa-solid fa-wifi fa-rotate-90 text-purple-400 text-lg"></i>
+            </button>
+
+            <button id="weather-pane-toggle-btn" class="glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors hidden" title="Toggle Weather Pane">
+                <i class="fa-solid fa-cloud text-blue-300 text-lg"></i>
+            </button>
+
+            <!-- Trash Menu Wrapper -->
+            <div class="relative flex justify-center">
+                <button id="trash-trigger-btn" class="glass w-11 h-11 md:w-12 md:h-12 rounded-full flex items-center justify-center hover:bg-red-500/20 transition-colors text-red-400 hover:text-red-300" title="Clear Markups">
+                    <i class="fa-solid fa-trash-can text-lg"></i>
+                </button>
+                <div id="trash-menu" class="absolute left-14 top-1/2 -translate-y-1/2 glass rounded-full px-2 py-1 hidden items-center gap-2 border border-red-500/30">
+                    <button class="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-red-400 transition-colors" onclick="clearSpecific('pins')" title="Clear Pins"><i class="fa-solid fa-map-marker-alt"></i></button>
+                    <button class="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-green-400 transition-colors" onclick="clearSpecific('drawings')" title="Clear Drawings"><i class="fa-solid fa-pen"></i></button>
+                    <button class="w-8 h-8 rounded-full hover:bg-white/10 flex items-center justify-center text-white transition-colors" onclick="clearSpecific('rulers')" title="Clear Rulers"><i class="fa-solid fa-ruler"></i></button>
+                    <div class="w-px h-6 bg-white/20 mx-1"></div>
+                    <button class="w-8 h-8 rounded-full hover:bg-red-500/30 flex items-center justify-center text-red-500 transition-colors" onclick="clearSpecific('all')" title="Clear All"><i class="fa-solid fa-times text-lg"></i></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Weather Pane -->
+        <div id="weather-pane" class="ui-element interactive-ui absolute right-0 top-0 h-full w-full sm:w-80 glass border-l border-white/20 transform translate-x-full slide-transition flex flex-col shadow-2xl z-40 transition-all duration-300">
+            <!-- Header -->
+            <div class="p-4 border-b border-white/10 flex flex-col justify-center bg-black/40 min-h-[5rem]">
+                <div class="flex justify-between items-start">
+                    <h2 class="text-lg font-semibold flex items-center gap-2">
+                        <i class="fa-solid fa-cloud-sun text-blue-400"></i> Scouting Weather
+                    </h2>
+                    <button id="close-weather-btn" class="text-gray-400 hover:text-white transition-colors p-1">
+                        <i class="fa-solid fa-chevron-right text-lg"></i>
+                    </button>
+                </div>
+                <div id="weather-location-name" class="text-xs text-gray-400 mt-1 truncate">No location selected</div>
+            </div>
+
+            <!-- Content Area -->
+            <div class="flex-1 overflow-y-auto relative" id="weather-content">
+                <div id="weather-empty-state" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 text-gray-400">
+                    <p class="text-sm">Drop a <i class="fa-solid fa-cloud-sun text-blue-400 mx-1"></i> Weather Pin to pull data.</p>
+                </div>
+
+                <div id="weather-loading" class="hidden absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <i class="fa-solid fa-circle-notch fa-spin text-2xl text-blue-400 mb-2"></i>
+                    <p class="text-sm">Loading 16-Day Forecast...</p>
+                </div>
+
+                <div id="weather-data-state" class="hidden h-full flex flex-col pb-24">
+                    
+                    <!-- Main Current Selected Hour -->
+                    <div class="p-5 border-b border-white/10 bg-gradient-to-b from-blue-900/30 to-transparent">
+                        <div id="w-main-time" class="text-sm text-gray-300 font-medium mb-1">...</div>
+                        <div class="flex items-center gap-4 mb-4">
+                            <div id="w-main-temp" class="text-5xl font-bold">--°</div>
+                        </div>
+                        
+                        <div class="grid grid-cols-3 gap-2 bg-black/30 p-3 rounded-lg border border-white/5">
+                            <div class="flex flex-col items-center justify-center text-xs">
+                                <i class="fa-solid fa-droplet text-blue-400 mb-1 text-sm"></i>
+                                <span id="w-main-precip" class="text-gray-300">--%</span>
+                            </div>
+                            <div class="flex flex-col items-center justify-center text-xs">
+                                <i class="fa-solid fa-water text-teal-400 mb-1 text-sm"></i>
+                                <span id="w-main-humidity" class="text-gray-300">--%</span>
+                            </div>
+                            <div class="flex flex-col items-center justify-center text-xs">
+                                <i id="w-main-wind-icon" class="fa-solid fa-arrow-up text-gray-300 mb-1 text-sm"></i>
+                                <span id="w-main-wind" class="text-gray-300 font-bold">-- mph</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Solar & Lunar Data (Hunting Context) -->
+                    <div class="p-4 border-b border-white/10 bg-black/20">
+                        <h3 class="text-[10px] text-gray-500 uppercase tracking-wider mb-2 font-bold">Sunrise & Sunset / Moon Phase</h3>
+                        <div class="grid grid-cols-3 gap-2 text-center text-xs">
+                            <div>
+                                <i class="fa-solid fa-sunrise text-yellow-500 mb-1 text-sm block"></i>
+                                <span id="w-sunrise" class="text-gray-300">--:--</span>
+                            </div>
+                            <div>
+                                <i class="fa-solid fa-sunset text-orange-500 mb-1 text-sm block"></i>
+                                <span id="w-sunset" class="text-gray-300">--:--</span>
+                            </div>
+                            <div>
+                                <span id="w-moon-icon" class="text-gray-300 mb-1 text-sm block">🌕</span>
+                                <span id="w-moon-phase" class="text-gray-300 truncate text-[10px]">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Next Hours List -->
+                    <div class="p-4 flex-1">
+                        <h3 class="text-[10px] text-gray-500 uppercase tracking-wider mb-3 font-bold">Hourly Forecast</h3>
+                        <div id="weather-blocks" class="flex flex-col gap-2"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom Timeline Slider -->
+        <div id="timeline-container" class="ui-element interactive-ui absolute bottom-0 left-0 w-full p-4 md:p-6 glass border-t border-white/20 transform translate-y-full slide-transition flex flex-col z-50 transition-all duration-300">
+            <div class="flex justify-between text-xs text-gray-300 mb-4 font-medium px-2">
+                <span id="timeline-label-start">Now</span>
+                <span id="timeline-label-current" class="text-blue-400 font-bold bg-blue-900/40 px-4 py-1.5 rounded-full border border-blue-500/40 text-sm">Scrub Time</span>
+                <span id="timeline-label-end">+15 Days</span>
+            </div>
+            <input type="range" id="timeline-slider" min="0" max="100" value="0" class="w-full">
+        </div>
+
+        <!-- Recover UI Button (Only visible in Presentation Mode) -->
+        <button id="recover-ui-btn" class="interactive-ui absolute top-6 right-6 glass px-5 py-2.5 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors hidden z-[100] gap-2 text-sm font-semibold shadow-2xl border border-white/30">
+            <i class="fa-solid fa-times text-gray-300"></i> Exit Presentation
+        </button>
+
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            
+            // --- STATE ---
+            const state = {
+                map: null,
+                currentTool: 'none',
+                drawColor: '#ef4444',
+                
+                layers: { pins: [], rulers: [], drawings: [] },
+                weatherPin: null,
+                scentConeGroup: null,
+                
+                rulerStartPt: null,
+                isDrawing: false,
+                currentPolyline: null,
+                
+                weatherData: null,
+                dailyData: null,
+                currentScrubIndex: 0,
+                
+                windEnabled: false,
+                scentConesEnabled: false,
+                windDirection: 0,
+                windSpeed: 0,
+                isPanning: false,
+                isPresentation: false
+            };
+
+            // --- DOM ---
+            const els = {
+                searchInp: document.getElementById('search-input'),
+                searchBtn: document.getElementById('search-btn'),
+                presBtn: document.getElementById('presentation-btn'),
+                recBtn: document.getElementById('recover-ui-btn'),
+                toolBtns: document.querySelectorAll('.tool-btn'),
+                trashBtn: document.getElementById('trash-trigger-btn'),
+                trashMenu: document.getElementById('trash-menu'),
+                windBtn: document.getElementById('wind-toggle-btn'),
+                scentBtn: document.getElementById('scent-toggle-btn'),
+                drawColorsDiv: document.getElementById('draw-colors'),
+                drawColorBtns: document.querySelectorAll('.draw-color-btn'),
+                
+                wPane: document.getElementById('weather-pane'),
+                wClose: document.getElementById('close-weather-btn'),
+                wLocName: document.getElementById('weather-location-name'),
+                wEmpty: document.getElementById('weather-empty-state'),
+                wLoad: document.getElementById('weather-loading'),
+                wData: document.getElementById('weather-data-state'),
+                wPaneToggle: document.getElementById('weather-pane-toggle-btn'),
+                
+                wMainTime: document.getElementById('w-main-time'),
+                wMainTemp: document.getElementById('w-main-temp'),
+                wMainPrecip: document.getElementById('w-main-precip'),
+                wMainHumidity: document.getElementById('w-main-humidity'),
+                wMainWind: document.getElementById('w-main-wind'),
+                wMainWindIcon: document.getElementById('w-main-wind-icon'),
+                wSunrise: document.getElementById('w-sunrise'),
+                wSunset: document.getElementById('w-sunset'),
+                wMoonIcon: document.getElementById('w-moon-icon'),
+                wMoonPhase: document.getElementById('w-moon-phase'),
+                wBlocks: document.getElementById('weather-blocks'),
+
+                timeContainer: document.getElementById('timeline-container'),
+                timeSlider: document.getElementById('timeline-slider'),
+                timeLabelCurr: document.getElementById('timeline-label-current'),
+                
+                canvas: document.getElementById('wind-canvas'),
+                uiElements: document.querySelectorAll('.ui-element')
+            };
+
+            // --- INIT MAP ---
+            function initMap() {
+                // wheelPxPerZoomLevel allows buttery smooth scroll wheel fractional zooming
+                state.map = L.map('map', { 
+                    zoomControl: false, 
+                    attributionControl: false, 
+                    zoomSnap: 0.25, 
+                    zoomDelta: 0.25,
+                    wheelPxPerZoomLevel: 60
+                }).setView([45.09, -93.43], 16.5);
+
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { 
+                    maxZoom: 19 
+                }).addTo(state.map);
+                
+                state.scentConeGroup = L.layerGroup().addTo(state.map);
+
+                setupEvents();
+                initWindCanvas();
+            }
+
+            function setupEvents() {
+                els.toolBtns.forEach(btn => btn.addEventListener('click', handleToolSelect));
+                els.windBtn.addEventListener('click', toggleWind);
+                els.scentBtn.addEventListener('click', toggleScentCones);
+                
+                els.drawColorBtns.forEach(btn => btn.addEventListener('click', (e) => {
+                    state.drawColor = e.target.dataset.color;
+                    updateDrawColorUI();
+                    e.stopPropagation();
+                }));
+
+                // Map Interactions
+                state.map.on('click', onMapClick);
+                state.map.on('mousedown', onMapMouseDown);
+                state.map.on('mousemove', onMapMouseMove);
+                state.map.on('mouseup', onMapMouseUp);
+
+                // Wind Canvas Optimization during Map movement
+                state.map.on('movestart zoomstart', () => {
+                    state.isPanning = true;
+                    if(ctx) ctx.clearRect(0, 0, width, height);
+                });
+                state.map.on('moveend zoomend', () => {
+                    state.isPanning = false;
+                    if(state.windEnabled) drawWindGrid();
+                });
+
+                // Search
+                els.searchBtn.addEventListener('click', searchLocation);
+                els.searchInp.addEventListener('keypress', (e) => { if(e.key === 'Enter') searchLocation(); });
+                
+                // Weather & Timeline
+                els.wClose.addEventListener('click', () => {
+                    els.wPane.classList.remove('weather-pane-open');
+                    els.wPaneToggle.classList.remove('hidden');
+                });
+                els.wPaneToggle.addEventListener('click', () => {
+                    els.wPane.classList.add('weather-pane-open');
+                    els.wPaneToggle.classList.add('hidden');
+                });
+
+                els.timeSlider.addEventListener('input', (e) => {
+                    state.currentScrubIndex = parseInt(e.target.value);
+                    updateWeatherUI();
+                });
+
+                // Trash Menu Handle
+                els.trashBtn.addEventListener('click', (e) => {
+                    els.trashMenu.classList.toggle('hidden');
+                    els.trashMenu.classList.toggle('flex');
+                    e.stopPropagation();
+                });
+
+                document.addEventListener('click', (e) => {
+                    if (!els.trashBtn.contains(e.target) && !els.trashMenu.contains(e.target)) {
+                        els.trashMenu.classList.add('hidden');
+                        els.trashMenu.classList.remove('flex');
+                    }
+                });
+
+                // Presentation Mode
+                els.presBtn.addEventListener('click', togglePresentation);
+                els.recBtn.addEventListener('click', togglePresentation);
+            }
+
+            // --- PRESENTATION MODE ---
+            function togglePresentation() {
+                state.isPresentation = !state.isPresentation;
+                els.uiElements.forEach(el => el.classList.toggle('presentation-hidden', state.isPresentation));
+                els.recBtn.classList.toggle('hidden', !state.isPresentation);
+            }
+
+            // --- TOOLS LOGIC ---
+            function handleToolSelect(e) {
+                const tool = e.currentTarget.dataset.tool;
+                state.currentTool = state.currentTool === tool ? 'none' : tool;
+                
+                state.map.dragging.enable();
+                state.rulerStartPt = null;
+                els.drawColorsDiv.classList.add('opacity-0', 'pointer-events-none');
+                document.getElementById('map').classList.remove('cursor-crosshair', 'cursor-pointer-map');
+
+                els.toolBtns.forEach(b => {
+                    if(b.dataset.tool === state.currentTool) {
+                        b.classList.remove('bg-white/10'); b.classList.add('bg-blue-600/90', 'border-blue-400', 'border');
+                    } else {
+                        b.classList.add('bg-white/10'); b.classList.remove('bg-blue-600/90', 'border-blue-400', 'border');
+                    }
+                });
+
+                if (state.currentTool === 'draw') {
+                    state.map.dragging.disable();
+                    els.drawColorsDiv.classList.remove('opacity-0', 'pointer-events-none');
+                    document.getElementById('map').classList.add('cursor-crosshair');
+                } else if (state.currentTool === 'ruler') {
+                    document.getElementById('map').classList.add('cursor-crosshair');
+                } else if (state.currentTool !== 'none') {
+                    document.getElementById('map').classList.add('cursor-pointer-map');
+                }
+            }
+
+            function updateDrawColorUI() {
+                els.drawColorBtns.forEach(b => {
+                    if (b.dataset.color === state.drawColor) b.classList.replace('border-transparent', 'border-white');
+                    else b.classList.replace('border-white', 'border-transparent');
+                });
+            }
+
+            // --- MAP INTERACTIONS ---
+            function onMapClick(e) {
+                if (state.currentTool === 'pin') dropStandardPin(e.latlng);
+                else if (state.currentTool === 'weather') dropWeatherPin(e.latlng);
+                else if (state.currentTool === 'ruler') handleRulerClick(e.latlng);
+            }
+
+            // DRAW TOOL
+            function onMapMouseDown(e) {
+                if (state.currentTool !== 'draw') return;
+                state.isDrawing = true;
+                state.currentPolyline = L.polyline([e.latlng], { color: state.drawColor, weight: 4 }).addTo(state.map);
+                state.layers.drawings.push(state.currentPolyline);
+            }
+            function onMapMouseMove(e) {
+                if (!state.isDrawing || state.currentTool !== 'draw' || !state.currentPolyline) return;
+                state.currentPolyline.addLatLng(e.latlng);
+            }
+            function onMapMouseUp() {
+                state.isDrawing = false;
+                state.currentPolyline = null;
+            }
+
+            // RULER LOGIC (YARDS)
+            function handleRulerClick(latlng) {
+                if (!state.rulerStartPt) {
+                    state.rulerStartPt = latlng;
+                    const startDot = L.circleMarker(latlng, { radius: 4, color: '#ffffff', fillOpacity: 1 }).addTo(state.map);
+                    state.layers.rulers.push(startDot);
+                } else {
+                    const line = L.polyline([state.rulerStartPt, latlng], { color: '#ffffff', weight: 4, dashArray: '5, 8' }).addTo(state.map);
+                    state.layers.rulers.push(line);
+                    
+                    const endDot = L.circleMarker(latlng, { radius: 4, color: '#ffffff', fillOpacity: 1 }).addTo(state.map);
+                    state.layers.rulers.push(endDot);
+
+                    const meters = state.rulerStartPt.distanceTo(latlng);
+                    const yards = Math.round(meters * 1.09361);
+                    const text = yards > 1760 ? `${(yards/1760).toFixed(2)} mi` : `${yards.toLocaleString()} yds`;
+
+                    line.bindTooltip(text, { permanent: true, className: 'ruler-tooltip', direction: 'center' }).openTooltip();
+                    state.rulerStartPt = null; 
+                }
+            }
+
+            // PINS & CUSTOM POPUP
+            function dropStandardPin(latlng) {
+                const icon = buildPinIcon(state.drawColor);
+                const marker = L.marker(latlng, { icon: icon }).addTo(state.map);
+                state.layers.pins.push(marker);
+
+                // Build Popup wrapper
+                const div = document.createElement('div');
+                div.className = 'flex gap-2 p-1 items-center justify-center';
+                
+                const colors = ['#ef4444', '#3b82f6', '#22c55e', '#facc15'];
+                colors.forEach(c => {
+                    const cb = document.createElement('button');
+                    // Explicit inline sizing prevents leaflet from crushing the swatches
+                    cb.style.cssText = `background-color: ${c}; width: 28px; height: 28px; min-width: 28px;`;
+                    cb.className = 'rounded-full border-2 border-transparent hover:border-white transition-all shadow-md cursor-pointer';
+                    cb.onclick = (e) => {
+                        marker.setIcon(buildPinIcon(c));
+                        marker.closePopup();
+                    };
+                    div.appendChild(cb);
+                });
+
+                const delBtn = document.createElement('button');
+                delBtn.style.cssText = `width: 28px; height: 28px; min-width: 28px;`;
+                delBtn.className = 'rounded-full bg-red-600 border-2 border-red-400 flex items-center justify-center hover:bg-red-500 ml-1 shadow-md cursor-pointer text-white';
+                delBtn.innerHTML = '<i class="fa-solid fa-times text-sm leading-none"></i>';
+                delBtn.onclick = (e) => {
+                    state.map.removeLayer(marker);
+                    state.layers.pins = state.layers.pins.filter(m => m !== marker);
+                    updateScentCones();
+                };
+                div.appendChild(delBtn);
+
+                marker.bindPopup(div, { minWidth: 180 });
+                marker.openPopup();
+                updateScentCones();
+            }
+
+            function buildPinIcon(color) {
+                return L.divIcon({
+                    className: 'custom-div-icon',
+                    html: `<div class="custom-pin-marker" style="background-color: ${color}"></div>`,
+                    iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12]
+                });
+            }
+
+            // EXPOSED TO GLOBAL SCOPE FOR HTML ONCLICK
+            window.clearSpecific = function(type) {
+                if (type === 'all') {
+                    ['pins', 'drawings', 'rulers'].forEach(k => {
+                        state.layers[k].forEach(item => state.map.removeLayer(item));
+                        state.layers[k] = [];
+                    });
+                } else if (state.layers[type]) {
+                    state.layers[type].forEach(item => state.map.removeLayer(item));
+                    state.layers[type] = [];
+                }
+                updateScentCones();
+                els.trashMenu.classList.add('hidden');
+                els.trashMenu.classList.remove('flex');
+            };
+
+            // --- WEATHER SYSTEM (OPEN-METEO) ---
+            async function dropWeatherPin(latlng) {
+                if (state.weatherPin) state.map.removeLayer(state.weatherPin);
+                
+                const icon = L.divIcon({
+                    className: 'custom-div-icon',
+                    html: `<div class="weather-pin-marker"><i class="fa-solid fa-cloud-sun"></i></div>`,
+                    iconSize: [32, 32], iconAnchor: [16, 16]
+                });
+                state.weatherPin = L.marker(latlng, { icon: icon, zIndexOffset: 100 }).addTo(state.map);
+
+                els.wPane.classList.add('weather-pane-open');
+                els.wPaneToggle.classList.add('hidden');
+                
+                // Revert tool back to Pan
+                const panBtn = Array.from(els.toolBtns).find(b => b.dataset.tool === 'none');
+                if(panBtn) panBtn.click();
+                
+                els.wEmpty.classList.add('hidden');
+                els.wData.classList.add('hidden');
+                els.wLoad.classList.remove('hidden');
+                els.wLocName.textContent = "Fetching location...";
+
+                // Geocode
+                try {
+                    const resG = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latlng.lat}&lon=${latlng.lng}&zoom=10`);
+                    const dataG = await resG.json();
+                    els.wLocName.textContent = dataG.name || dataG.display_name.split(',')[0] || "Unknown Location";
+                } catch(e) { els.wLocName.textContent = `${latlng.lat.toFixed(3)}, ${latlng.lng.toFixed(3)}`; }
+
+                // Weather
+                try {
+                    const url = `https://api.open-meteo.com/v1/forecast?latitude=${latlng.lat}&longitude=${latlng.lng}&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,wind_speed_10m,wind_direction_10m&daily=sunrise,sunset&forecast_days=16&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto`;
+                    const resW = await fetch(url);
+                    if(!resW.ok) throw new Error("API Error");
+                    
+                    const fullData = await resW.json();
+                    state.weatherData = fullData.hourly;
+                    state.dailyData = fullData.daily;
+                    
+                    setupTimeline();
+                    els.wLoad.classList.add('hidden');
+                    els.wData.classList.remove('hidden');
+                } catch(e) {
+                    els.wLoad.classList.add('hidden');
+                    els.wEmpty.classList.remove('hidden');
+                    els.wEmpty.innerHTML = `<p class="text-red-400"><i class="fa-solid fa-triangle-exclamation mb-2 text-2xl"></i><br>Weather load failed.</p>`;
+                }
+            }
+
+            // MOON PHASE ALGORITHM
+            function getMoonPhaseName(dateObj) {
+                const lunarDays = 29.53058770576;
+                const newMoon2000 = new Date(Date.UTC(2000, 0, 6, 18, 14, 0));
+                const diff = (dateObj.getTime() - newMoon2000.getTime()) / 86400000;
+                const phase = (diff % lunarDays + lunarDays) % lunarDays; 
+                const fraction = phase / lunarDays;
+
+                if (fraction < 0.03 || fraction > 0.97) return {name: "New Moon", icon: "🌑"};
+                if (fraction < 0.22) return {name: "Waxing Crescent", icon: "🌒"};
+                if (fraction < 0.28) return {name: "First Quarter", icon: "🌓"};
+                if (fraction < 0.47) return {name: "Waxing Gibbous", icon: "🌔"};
+                if (fraction < 0.53) return {name: "Full Moon", icon: "🌕"};
+                if (fraction < 0.72) return {name: "Waning Gibbous", icon: "🌖"};
+                if (fraction < 0.78) return {name: "Last Quarter", icon: "🌗"};
+                return {name: "Waning Crescent", icon: "🌘"};
+            }
+
+            function setupTimeline() {
+                if(!state.weatherData) return;
+                const times = state.weatherData.time;
+                const maxIdx = times.length - 9; // Allow 8 hours forecast
+                
+                els.timeSlider.max = maxIdx;
+                
+                const now = new Date();
+                let closestIdx = 0; let minDiff = Infinity;
+                times.forEach((t, i) => {
+                    const diff = Math.abs(new Date(t) - now);
+                    if (diff < minDiff && i <= maxIdx) { minDiff = diff; closestIdx = i; }
+                });
+                
+                els.timeSlider.value = closestIdx;
+                state.currentScrubIndex = closestIdx;
+                
+                els.timeContainer.classList.add('timeline-open');
+                updateWeatherUI();
+            }
+
+            function updateWeatherUI() {
+                if(!state.weatherData) return;
+                const h = state.weatherData;
+                const idx = state.currentScrubIndex;
+                
+                const date = new Date(h.time[idx]);
+                const timeOpts = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+                els.wMainTime.textContent = date.toLocaleDateString(undefined, timeOpts);
+                els.timeLabelCurr.textContent = date.toLocaleDateString(undefined, timeOpts);
+                
+                els.wMainTemp.textContent = Math.round(h.temperature_2m[idx]) + '°';
+                els.wMainPrecip.textContent = h.precipitation_probability[idx] + '%';
+                els.wMainHumidity.textContent = h.relative_humidity_2m[idx] + '%';
+                
+                const wd = h.wind_direction_10m[idx];
+                const ws = Math.round(h.wind_speed_10m[idx]);
+                els.wMainWind.textContent = ws + ' mph';
+                els.wMainWindIcon.style.transform = `rotate(${wd + 180}deg)`; // Point where wind is GOING
+
+                state.windDirection = wd;
+                state.windSpeed = ws;
+
+                // Solar / Lunar Data mapping based on current day index
+                if(state.dailyData) {
+                    const dayString = date.toISOString().split('T')[0]; // YYYY-MM-DD
+                    const dayIdx = state.dailyData.time.indexOf(dayString);
+                    if(dayIdx !== -1) {
+                        const sr = new Date(state.dailyData.sunrise[dayIdx]);
+                        const ss = new Date(state.dailyData.sunset[dayIdx]);
+                        els.wSunrise.textContent = sr.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'});
+                        els.wSunset.textContent = ss.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'});
+                        
+                        const moon = getMoonPhaseName(date);
+                        els.wMoonIcon.textContent = moon.icon;
+                        els.wMoonPhase.textContent = moon.name;
+                    }
+                }
+
+                // Refresh overlays
+                if (state.windEnabled && !state.isPanning) drawWindGrid();
+                if (state.scentConesEnabled) updateScentCones();
+
+                // 8 Hour Forecast to fill vertical space
+                els.wBlocks.innerHTML = '';
+                for(let i = idx + 1; i <= idx + 8; i++) {
+                    const blockDate = new Date(h.time[i]);
+                    const timeStr = blockDate.toLocaleTimeString([], {hour: 'numeric'});
+                    
+                    const blockWd = h.wind_direction_10m[i];
+                    const blockWs = Math.round(h.wind_speed_10m[i]);
+                    
+                    const el = document.createElement('div');
+                    el.className = 'glass p-3 rounded-lg flex items-center justify-between text-sm border border-white/5 bg-black/20';
+                    el.innerHTML = `
+                        <div class="w-14 font-medium text-gray-300">${timeStr}</div>
+                        <div class="font-bold w-8 text-right">${Math.round(h.temperature_2m[i])}°</div>
+                        <div class="flex items-center gap-1 w-12 justify-end text-blue-300 text-xs"><i class="fa-solid fa-droplet scale-75"></i> ${h.precipitation_probability[i]}%</div>
+                        <div class="flex items-center gap-1.5 w-16 justify-end text-gray-300 text-xs">
+                            <span class="font-bold">${blockWs}</span>
+                            <i class="fa-solid fa-arrow-up text-[10px]" style="transform: rotate(${blockWd + 180}deg)"></i>
+                        </div>
+                    `;
+                    els.wBlocks.appendChild(el);
+                }
+            }
+
+            // --- WIND GRID CANVAS (Optimized) ---
+            let ctx, width, height;
+
+            function initWindCanvas() {
+                ctx = els.canvas.getContext('2d');
+                resizeCanvas();
+                window.addEventListener('resize', () => {
+                    resizeCanvas();
+                    if (state.windEnabled && !state.isPanning) drawWindGrid();
+                });
+            }
+
+            function resizeCanvas() {
+                width = els.canvas.width = window.innerWidth;
+                height = els.canvas.height = window.innerHeight;
+            }
+
+            function toggleWind() {
+                state.windEnabled = !state.windEnabled;
+                if(state.windEnabled) {
+                    els.windBtn.classList.add('bg-blue-600/90', 'border-blue-400', 'border');
+                    if(!state.isPanning) drawWindGrid();
+                } else {
+                    els.windBtn.classList.remove('bg-blue-600/90', 'border-blue-400', 'border');
+                    ctx.clearRect(0, 0, width, height);
+                }
+            }
+
+            function drawWindGrid() {
+                ctx.clearRect(0, 0, width, height);
+                if (!state.windEnabled || state.windSpeed === 0) return;
+
+                const spacing = window.innerWidth < 768 ? 80 : 120; // Denser on mobile
+                const blowingToDeg = (state.windDirection + 180) % 360;
+                const rad = (blowingToDeg - 90) * (Math.PI / 180); // Map north to Canvas up
+                const speed = state.windSpeed;
+
+                let color = 'rgba(34, 197, 94, 0.8)'; // Green
+                if (speed >= 5 && speed <= 15) color = 'rgba(250, 204, 21, 0.8)'; // Yellow
+                if (speed > 15) color = 'rgba(239, 68, 68, 0.8)'; // Red
+
+                const len = 20 + (speed * 1.5); 
+
+                ctx.strokeStyle = color;
+                ctx.lineWidth = window.innerWidth < 768 ? 2 : 3;
+                ctx.lineCap = 'round';
+                ctx.beginPath(); // Batch drawing for high performance
+
+                for (let x = spacing / 2; x < width; x += spacing) {
+                    for (let y = spacing / 2; y < height; y += spacing) {
+                        const endX = x + Math.cos(rad) * (len / 2);
+                        const endY = y + Math.sin(rad) * (len / 2);
+                        const startX = x - Math.cos(rad) * (len / 2);
+                        const startY = y - Math.sin(rad) * (len / 2);
+
+                        ctx.moveTo(startX, startY);
+                        ctx.lineTo(endX, endY);
+
+                        const headLen = 8;
+                        const headAngle = 0.5; 
+                        ctx.lineTo(endX - headLen * Math.cos(rad - headAngle), endY - headLen * Math.sin(rad - headAngle));
+                        ctx.moveTo(endX, endY);
+                        ctx.lineTo(endX - headLen * Math.cos(rad + headAngle), endY - headLen * Math.sin(rad + headAngle));
+                    }
+                }
+                ctx.stroke();
+            }
+
+            // --- DYNAMIC SCENT CONES ---
+            function toggleScentCones() {
+                state.scentConesEnabled = !state.scentConesEnabled;
+                if(state.scentConesEnabled) els.scentBtn.classList.add('bg-purple-600/90', 'border-purple-400', 'border');
+                else els.scentBtn.classList.remove('bg-purple-600/90', 'border-purple-400', 'border');
+                updateScentCones();
+            }
+
+            function getDestPoint(lat, lng, distMeters, brngDeg) {
+                const R = 6378137;
+                const brng = brngDeg * Math.PI / 180;
+                const lat1 = lat * Math.PI / 180;
+                const lon1 = lng * Math.PI / 180;
+                const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distMeters/R) + Math.cos(lat1) * Math.sin(distMeters/R) * Math.cos(brng));
+                const lon2 = lon1 + Math.atan2(Math.sin(brng) * Math.sin(distMeters/R) * Math.cos(lat1), Math.cos(distMeters/R) - Math.sin(lat1) * Math.sin(lat2));
+                return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
+            }
+
+            function updateScentCones() {
+                if (!state.scentConeGroup) return;
+                state.scentConeGroup.clearLayers();
+                
+                if (!state.scentConesEnabled || state.layers.pins.length === 0 || !state.weatherData) return;
+
+                const blowingToDeg = (state.windDirection + 180) % 360;
+                const speed = state.windSpeed;
+                
+                // Dynamic Length & Width
+                const dist = 50 + (speed * 20); // Meters
+                let spread = 40; // Default
+                if(speed < 5) spread = 60; // Swirling, wide cone
+                else if (speed > 15) spread = 20; // High wind, tight tunnel
+
+                state.layers.pins.forEach(marker => {
+                    const latlng = marker.getLatLng();
+                    const origin = [latlng.lat, latlng.lng];
+                    const leftPt = getDestPoint(latlng.lat, latlng.lng, dist, blowingToDeg - (spread/2));
+                    const rightPt = getDestPoint(latlng.lat, latlng.lng, dist, blowingToDeg + (spread/2));
+
+                    const poly = L.polygon([origin, leftPt, rightPt], {
+                        color: 'rgba(168, 85, 247, 0.5)',
+                        fillColor: '#a855f7',
+                        fillOpacity: 0.3,
+                        weight: 1,
+                        interactive: false // Passes clicks to map
+                    });
+                    state.scentConeGroup.addLayer(poly);
+                });
+            }
+
+            // --- UTILS ---
+            async function searchLocation() {
+                const q = els.searchInp.value.trim();
+                if(!q) return;
+                els.searchBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i>';
+                
+                try {
+                    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`);
+                    const data = await res.json();
+                    if(data && data.length > 0) {
+                        state.map.flyTo([data[0].lat, data[0].lon], 16.5, { duration: 1.5 });
+                        els.searchInp.value = ''; els.searchInp.blur();
+                    }
+                } catch(e) { console.error(e); }
+                finally { els.searchBtn.innerHTML = '<i class="fa-solid fa-arrow-right"></i>'; }
+            }
+
+            initMap();
+        });
+    </script>
+</body>
+</html>
